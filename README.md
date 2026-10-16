@@ -8,7 +8,7 @@
 A tiny system tray battery indicator for the **Razer Viper V3 Pro** wireless mouse. No Razer Synapse, no kernel drivers, no admin required. ~9 MB resident, single-file `.exe`.
 
 <p align="center">
-  <img src="docs/demo.gif" alt="Viper Tray demo" />
+  <img src="docs/demo-v2.3.0.gif" alt="Viper Tray demo" />
   <br/>
   <sub><em>First interaction: hover → native tooltip. Second: left-click → popup with the percentage.</em></sub>
 </p>
