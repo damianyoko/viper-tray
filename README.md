@@ -35,13 +35,14 @@ If the only thing you use Synapse for is checking your mouse battery, this does 
 
 ## What you get
 
-- A horizontal battery icon in the system tray, colour-coded:
+- A compact gauge icon in the system tray: the outer ring shows battery level around the Viper `V`, colour-coded:
   - **Green** ≥ 60%
   - **Orange** 20–60%
   - **Red** < 20%
-- **Left-click** → small popup near cursor showing the percentage. Click again to dismiss.
+- **Left-click** → small popup near cursor with a large percentage, connection state, and battery bar. Click again to dismiss.
 - **Right-click** → menu: *Refresh now* / *Exit*.
 - Auto-refresh every 5 minutes (system-coalesced waitable timer; battery-friendly on laptops).
+- Transient read failures show as *retrying* first; the tray keeps the last known percentage and retries quickly before declaring the mouse offline.
 - Single-instance guard via named mutex — clicking the icon twice doesn't stack trays.
 - Survives reboots once installed.
 
@@ -100,7 +101,7 @@ The PID filter and transaction ID are hard-coded for this mouse. Other Razer mic
 
 **The icon doesn't appear** — Windows hides new tray icons by default. Click the `^` arrow in your taskbar and drag the battery icon out into the always-visible area.
 
-**It shows `?` (offline)** — your dongle isn't connected, or the mouse is asleep. Move the mouse and click *Refresh now*. If it stays offline, unplug and replug the dongle.
+**It shows `retrying` or `offline`** — brief `retrying` states usually mean the mouse was asleep or the dongle returned a transient HID busy/not-ready response. The tray keeps the last known percentage when available, retries every 15 seconds for the first two failed reads, then marks the mouse offline and retries every 30 seconds. If it stays offline, move the mouse, click *Refresh now*, or unplug and replug the dongle.
 
 **Two icons appear on boot** — duplicate Run entries. Run `.\uninstall.ps1` then `.\install.ps1` to reset cleanly.
 

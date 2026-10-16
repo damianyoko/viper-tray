@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.3.0 — 2026-10-16
+
+Readability + resilience pass.
+
+- Reworked the tray battery display into a circular gauge around the Viper `V`, so charge level is readable as a ring at tray size.
+- Replaced the left-click text-only popup with a compact battery meter: large percentage, connection state, and a mini battery bar.
+- Reduced false offline/disconnected states. Failed HID reads now keep the last known percentage, show `retrying`, retry quickly, and only switch to offline after repeated misses.
+- Made the HID battery query more tolerant while the mouse or dongle is waking up by retrying raw zero/not-ready responses and transient feature-report failures.
+
 ## v2.2.0 — 2026-05-06
 
 New icon design + popup polish.

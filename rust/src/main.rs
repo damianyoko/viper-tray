@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::thread;
 
 use muda::{Menu, MenuEvent, MenuItem};
-use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -18,7 +18,15 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const REFRESH_SECS: i64 = 300;
+const TRANSIENT_RETRY_SECS: i64 = 15;
+const OFFLINE_RETRY_SECS: i64 = 30;
+const OFFLINE_AFTER_MISSES: u8 = 3;
 const APP_TITLE: &str = "Viper Tray";
+
+const STATE_CHECKING: i32 = -1;
+const STATE_CONNECTED: i32 = 0;
+const STATE_RETRYING: i32 = 1;
+const STATE_OFFLINE: i32 = 2;
 
 // HANDLE is *mut c_void which isn't Send by default. We share kernel handles between
 // the UI thread and the worker thread; that's safe — Win32 sync handles are designed
@@ -52,12 +60,13 @@ fn main() {
     let id_refresh = item_refresh.id().clone();
     let id_exit = item_exit.id().clone();
 
-    let pct = Arc::new(AtomicI32::new(-1)); // -1 offline, 0..=100 pct
+    let last_pct = Arc::new(AtomicI32::new(-1)); // -1 = no successful read yet
+    let connection_state = Arc::new(AtomicI32::new(STATE_CHECKING));
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false) // left-click = our popup, right-click = menu
-        .with_tooltip(format!("{}: --", APP_TITLE))
+        .with_tooltip(format!("{}: checking...", APP_TITLE))
         .with_icon(build_icon(None))
         .build()
         .expect("failed to build tray");
@@ -65,29 +74,48 @@ fn main() {
     // Waitable timer: drives both periodic and manual refreshes.
     // Manual refresh = SetWaitableTimer(due_time = -1ms) to fire immediately.
     let timer = SendHandle(
-        unsafe { CreateWaitableTimerW(None, false, PCWSTR::null()) }
-            .expect("CreateWaitableTimer"),
+        unsafe { CreateWaitableTimerW(None, false, PCWSTR::null()) }.expect("CreateWaitableTimer"),
     );
     arm_timer(timer, 0); // first read fires immediately on startup
 
     // Worker: waits on the timer, queries the mouse, posts WM_APP_REFRESH to UI thread.
     {
-        let pct = pct.clone();
-        thread::spawn(move || loop {
-            // Block until the timer fires (system-coalesced).
-            wait_handle(timer);
-            let val = battery::read_battery_percent();
-            pct.store(val.map(|v| v as i32).unwrap_or(-1), Ordering::Release);
-            unsafe {
-                let _ = PostThreadMessageW(
-                    MAIN_THREAD_ID.load(Ordering::Acquire) as u32,
-                    WM_APP_REFRESH,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
+        let last_pct = last_pct.clone();
+        let connection_state = connection_state.clone();
+        thread::spawn(move || {
+            let mut misses: u8 = 0;
+            loop {
+                // Block until the timer fires (system-coalesced).
+                wait_handle(timer);
+                let next_refresh_secs = match battery::read_battery_percent() {
+                    Some(val) => {
+                        misses = 0;
+                        last_pct.store(val as i32, Ordering::Release);
+                        connection_state.store(STATE_CONNECTED, Ordering::Release);
+                        REFRESH_SECS
+                    }
+                    None => {
+                        misses = misses.saturating_add(1);
+                        if misses < OFFLINE_AFTER_MISSES {
+                            connection_state.store(STATE_RETRYING, Ordering::Release);
+                            TRANSIENT_RETRY_SECS
+                        } else {
+                            connection_state.store(STATE_OFFLINE, Ordering::Release);
+                            OFFLINE_RETRY_SECS
+                        }
+                    }
+                };
+                unsafe {
+                    let _ = PostThreadMessageW(
+                        MAIN_THREAD_ID.load(Ordering::Acquire) as u32,
+                        WM_APP_REFRESH,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+                // Re-arm for the next periodic check.
+                arm_timer(timer, next_refresh_secs);
             }
-            // Re-arm for the next periodic check.
-            arm_timer(timer, REFRESH_SECS);
         });
     }
 
@@ -144,19 +172,13 @@ fn main() {
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             match msg.message {
                 m if m == WM_APP_REFRESH => {
-                    let p = pct.load(Ordering::Acquire);
-                    let opt = if p < 0 { None } else { Some(p as u8) };
-                    let _ = tray.set_icon(Some(build_icon(opt)));
-                    let tip = match opt {
-                        Some(v) => format!("{}: {}%", APP_TITLE, v),
-                        None => format!("{}: offline", APP_TITLE),
-                    };
-                    let _ = tray.set_tooltip(Some(tip));
+                    let display = load_display(&last_pct, &connection_state);
+                    let _ = tray.set_icon(Some(build_icon(display.icon_percent())));
+                    let _ = tray.set_tooltip(Some(display.tooltip()));
                 }
                 m if m == WM_APP_TRAY_LCLICK => {
-                    let p = pct.load(Ordering::Acquire);
-                    let label = if p < 0 { "offline".into() } else { format!("{}%", p) };
-                    popup::toggle_popup(&label);
+                    let display = load_display(&last_pct, &connection_state);
+                    popup::toggle_popup(display.popup_percent(), display.popup_state());
                     // fire a fresh read so the next click shows newer data
                     arm_timer(timer, 0);
                 }
@@ -181,8 +203,6 @@ fn main() {
     }
 }
 
-
-
 fn arm_timer(h: SendHandle, secs: i64) {
     // Negative = relative, units = 100ns. 0 secs => fire immediately (-1 == 100ns).
     let due_ns: i64 = if secs <= 0 { -1 } else { -secs * 10_000_000 };
@@ -204,6 +224,61 @@ fn build_icon(pct: Option<u8>) -> Icon {
     let (w, h) = icon::icon_dim();
     let rgba = icon::build_icon_rgba(pct);
     Icon::from_rgba(rgba, w, h).expect("icon")
+}
+
+#[derive(Clone, Copy)]
+struct DisplayState {
+    last_pct: Option<u8>,
+    state: i32,
+}
+
+impl DisplayState {
+    fn icon_percent(self) -> Option<u8> {
+        match self.state {
+            STATE_CONNECTED | STATE_RETRYING => self.last_pct,
+            _ => None,
+        }
+    }
+
+    fn popup_percent(self) -> Option<u8> {
+        match self.state {
+            STATE_CONNECTED | STATE_RETRYING => self.last_pct,
+            _ => None,
+        }
+    }
+
+    fn popup_state(self) -> popup::PopupState {
+        match self.state {
+            STATE_CHECKING => popup::PopupState::Checking,
+            STATE_CONNECTED => popup::PopupState::Connected,
+            STATE_RETRYING => popup::PopupState::Retrying,
+            _ => popup::PopupState::Offline,
+        }
+    }
+
+    fn tooltip(self) -> String {
+        match (self.state, self.last_pct) {
+            (STATE_CHECKING, _) => format!("{}: checking...", APP_TITLE),
+            (STATE_CONNECTED, Some(p)) => format!("{}: {}%", APP_TITLE, p),
+            (STATE_RETRYING, Some(p)) => format!("{}: {}% (retrying)", APP_TITLE, p),
+            (STATE_RETRYING, None) => format!("{}: retrying...", APP_TITLE),
+            (STATE_OFFLINE, Some(p)) => format!("{}: offline (last seen {}%)", APP_TITLE, p),
+            _ => format!("{}: offline", APP_TITLE),
+        }
+    }
+}
+
+fn load_display(last_pct: &AtomicI32, connection_state: &AtomicI32) -> DisplayState {
+    let raw_pct = last_pct.load(Ordering::Acquire);
+    let last_pct = if raw_pct < 0 {
+        None
+    } else {
+        Some(raw_pct as u8)
+    };
+    DisplayState {
+        last_pct,
+        state: connection_state.load(Ordering::Acquire),
+    }
 }
 
 fn acquire_singleton() -> Option<HANDLE> {

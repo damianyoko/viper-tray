@@ -114,7 +114,10 @@ unsafe fn wide_to_string(p: *const u16) -> String {
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn try_query(path: &str) -> Option<u8> {
@@ -165,6 +168,7 @@ fn try_query(path: &str) -> Option<u8> {
         req[6] = 0x02; // data_size
         req[7] = 0x07; // command_class (power)
         req[8] = 0x80; // command_id (get battery level)
+
         // CRC: XOR of bytes 3..=88
         let mut crc: u8 = 0;
         for i in 3..=88 {
@@ -175,27 +179,30 @@ fn try_query(path: &str) -> Option<u8> {
         // Retry loop: each attempt is a full SetFeature -> sleep -> GetFeature cycle,
         // with escalating sleep so the dongle has time to finish its 2.4GHz round-trip
         // to the mouse. Only status 0x02 is accepted as success; 0x01 means busy.
-        let sleeps_ms = [80u64, 150, 250];
+        // A successful report with raw battery 0 usually means the mouse is asleep
+        // or not ready yet, so retry it instead of immediately surfacing offline.
+        let sleeps_ms = [80u64, 150, 250, 500];
         let mut result: Option<u8> = None;
         for &sleep_ms in &sleeps_ms {
             let ok = HidD_SetFeature(handle, req.as_ptr() as *mut _, REPORT_LEN as u32);
             if !ok.as_bool() {
-                break;
+                sleep(Duration::from_millis(sleep_ms));
+                continue;
             }
             sleep(Duration::from_millis(sleep_ms));
 
             let mut resp = [0u8; REPORT_LEN];
             let ok = HidD_GetFeature(handle, resp.as_mut_ptr() as *mut _, REPORT_LEN as u32);
             if !ok.as_bool() {
-                break;
+                continue;
             }
 
             if resp[1] == 0x02 {
                 let raw = resp[10];
                 if raw == 0 {
-                    // mouse asleep / not-yet-ready; treat as offline (the firmware will
-                    // beep and the scroll wheel turns red long before it actually hits 0%)
-                    break;
+                    // Mouse asleep / not-yet-ready. The firmware will beep and the
+                    // scroll wheel turns red long before it actually hits 0%.
+                    continue;
                 }
                 let pct = ((raw as u32 * 100) / 255) as u8;
                 result = Some(pct.min(100));
