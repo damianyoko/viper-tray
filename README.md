@@ -101,7 +101,7 @@ The PID filter and transaction ID are hard-coded for this mouse. Other Razer mic
 
 **The icon doesn't appear** — Windows hides new tray icons by default. Click the `^` arrow in your taskbar and drag the battery icon out into the always-visible area.
 
-**It shows `retrying` or `offline`** — brief `retrying` states usually mean the mouse was asleep or the dongle returned a transient HID busy/not-ready response. The tray keeps the last known percentage when available, retries every 15 seconds for the first two failed reads, then marks the mouse offline and retries every 30 seconds. If it stays offline, move the mouse, click *Refresh now*, or unplug and replug the dongle.
+**It shows `retrying` or `offline`** — brief `retrying` states usually mean the mouse was asleep or the dongle returned a transient HID busy/not-ready response. The tray keeps the last known percentage when available and retries within a few seconds of any mouse or keyboard activity (usually the moment the mouse wakes up). With no activity it retries every 15 seconds for the first two failed reads, then every 30 seconds. If it stays offline while you're using the mouse, unplug and replug the dongle.
 
 **Two icons appear on boot** — duplicate Run entries. Run `.\uninstall.ps1` then `.\install.ps1` to reset cleanly.
 

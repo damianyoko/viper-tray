@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Auto-reconnect on activity: after a failed read (usually the mouse asleep), the tray checks for mouse/keyboard input every 3 seconds and re-reads as soon as you're active, instead of waiting up to 30 seconds. No more clicking the icon to wake it.
+
 ## v2.3.0 — 2026-10-16
 
 Readability + resilience pass.

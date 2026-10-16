@@ -15,12 +15,14 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEv
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Threading::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const REFRESH_SECS: i64 = 300;
 const TRANSIENT_RETRY_SECS: i64 = 15;
 const OFFLINE_RETRY_SECS: i64 = 30;
 const OFFLINE_AFTER_MISSES: u8 = 3;
+const ACTIVITY_POLL_SECS: i64 = 3;
 const APP_TITLE: &str = "Viper Tray";
 
 const STATE_CHECKING: i32 = -1;
@@ -84,12 +86,27 @@ fn main() {
         let connection_state = connection_state.clone();
         thread::spawn(move || {
             let mut misses: u8 = 0;
+            // After a failed read, poll for user input instead of sleeping blind:
+            // the mouse is usually just asleep, and any activity means it's awake again.
+            let mut fallback_secs: i64 = 0;
+            let mut waited_secs: i64 = 0;
+            let mut seen_input = last_input_tick();
             loop {
                 // Block until the timer fires (system-coalesced).
                 wait_handle(timer);
+                if fallback_secs > 0 {
+                    waited_secs += ACTIVITY_POLL_SECS;
+                    if last_input_tick() == seen_input && waited_secs < fallback_secs {
+                        arm_timer(timer, ACTIVITY_POLL_SECS);
+                        continue;
+                    }
+                }
+                seen_input = last_input_tick();
+                waited_secs = 0;
                 let next_refresh_secs = match battery::read_battery_percent() {
                     Some(val) => {
                         misses = 0;
+                        fallback_secs = 0;
                         last_pct.store(val as i32, Ordering::Release);
                         connection_state.store(STATE_CONNECTED, Ordering::Release);
                         REFRESH_SECS
@@ -98,11 +115,12 @@ fn main() {
                         misses = misses.saturating_add(1);
                         if misses < OFFLINE_AFTER_MISSES {
                             connection_state.store(STATE_RETRYING, Ordering::Release);
-                            TRANSIENT_RETRY_SECS
+                            fallback_secs = TRANSIENT_RETRY_SECS;
                         } else {
                             connection_state.store(STATE_OFFLINE, Ordering::Release);
-                            OFFLINE_RETRY_SECS
+                            fallback_secs = OFFLINE_RETRY_SECS;
                         }
+                        ACTIVITY_POLL_SECS
                     }
                 };
                 unsafe {
@@ -212,6 +230,17 @@ fn arm_timer(h: SendHandle, secs: i64) {
         SetWaitableTimer(h.0, &due_ns, 0, None, None, false)
             .expect("SetWaitableTimer failed — worker would be dead");
     }
+}
+
+fn last_input_tick() -> u32 {
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    unsafe {
+        let _ = GetLastInputInfo(&mut info);
+    }
+    info.dwTime
 }
 
 fn wait_handle(h: SendHandle) {
